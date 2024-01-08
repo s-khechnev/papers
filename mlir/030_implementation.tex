@@ -1,0 +1,313 @@
+% !TeX spellcheck = ru_RU
+% !TEX root = vkr.tex
+
+\section{Реализация}
+
+\subsection{Привязки}
+
+\subsubsection{Выбор версии MLIR}
+MLIR является подпроектом LLVM и входит в монорепозиторий LLVM\footnote{\url{https://github.com/llvm/llvm-project/} (дата доступа:   \DTMdate{2024-01-04}).}, поэтому версия MLIR совпадает с версией LLVM. На момент начала работы версия LLVM 16.0.6 являлась последней версией, к которой существовали привязки\footnote{\url{https://opam.ocaml.org/packages/llvm/llvm.16.0.6+nnp/} (дата доступа:   \DTMdate{2024-01-04}).} для \OCaml{}, поэтому было решено реализовывать привязки к версии MLIR 16.0.6.
+
+\subsubsection{C API}
+
+Из-за применения компиляторами \Cpp{} name mangling и различий в модели памяти создать привязки к \Cpp{} проблематично. Из-за этого обычно привязки делают к \C, который уже вызывает \Cpp{}. Специально для создания привязок MLIR имеет C API\footnote{\url{https://mlir.llvm.org/docs/CAPI/} (дата доступа:   \DTMdate{2024-01-04}).}, предоставляющий API к базовым возможностям MLIR. Поэтому привязки будут строится именно к этому API.
+
+\subsubsection{Первая сборка}
+
+Привязки к версии 16.0.6 строились поверх форка привязок\footnote{\url{https://github.com/tachukao/ocaml-mlir} (дата доступа:   \DTMdate{2024-01-04}).} к форку ML\-IR одиннадцатой версии, поэтому первым делом было необходимо обновить все зависимости и удалить устаревший код. Кроме того, чтобы не тратить время на сборку MLIR из исходников, было решено сделать возможным построение привязок поверх dev пакетов\footnote{\url{https://apt.llvm.org/} (дата доступа:   \DTMdate{2024-01-04}).} MLIR и LLVM.
+
+\subsubsection{Написание привязок}
+
+C API одиннадцатой версии MLIR беднее версии 16.0.6. Поэтому следующим шагом необходимо было реализовать недостающие привязки к C API версии 16.0.6 при помощи библиотеки ctypes \ref{sec:ctypes}.
+
+\subsubsection{Архитектура}
+
+Так как привязки создавались к \C{}, а \C{} относительно \OCaml{} это довольно низкоуровневый язык, поэтому над реализованными привязками находится ещё один уровень абстракции, который позволяет пользователям привязок не задумываться над приведением сложных \OCaml{} типов в примитивные типы \C{}.
+
+Вышеупомянутый дополнительный уровень абстракции над привязками\footnote{\url{https://github.com/s-khechnev/ocaml-mlir/tree/llvm-16.0.6/src/stubs} (дата доступа:   \DTMdate{2024-01-04}).} представляет из себя модуль\footnote{\url{https://github.com/s-khechnev/ocaml-mlir/blob/llvm-16.0.6/src/mlir/mlir.mli} (дата доступа:   \DTMdate{2024-01-04}).}, содержащий мини документацию к привязкам и инкапсулирующий преобразование сложных \OCaml{} типов в необходимые для привязок типы, предоставляемые ctypes, которые представляют типы \C{}. Например, список \OCaml{} преобразуется в пару: указатель на первый элемент и число элементов в списке.
+
+\subsection{Мини язык программирования}
+
+У MLIR есть учебное пособие\footnote{\url{https://mlir.llvm.org/docs/Tutorials/Toy/} (дата доступа:   \DTMdate{2024-01-04}).}, в котором реализуется <<игрушечный>> язык программирования, для быстрого освоения базовых концепций MLIR.
+
+В качестве доказательства работоспособности и примера использования реализованных привязок было решено реализовать вышеупомянутый язык программирования на \OCaml{} с использованием разработанных привязок.
+
+\subsubsection{Описание языка}
+
+Основным и единственным типом данных в данном языке программирования являются тензоры (ранга 0--2, т.~е константы, векторы и матрицы) с элементами типа \texttt{float64}. Язык позволяет производить различные математические операции над тензорами: поэлементное сложение и умножение, транспонирование и изменение формы тензора. Кроме того, можно определять функции и печатать тензоры. Переменные в языке неизменяемы. В языке статическая типизация, есть вывод типов.
+
+\begin{lstlisting}[caption={Пример программы на мини языке программирования.}, frame=single]
+def mul_transpose(a, b) {
+    return transpose(a) * transpose(b);
+}
+
+def main() {
+    var a = [[1.1, 2, 3.3], [4, 5.5, 6]];
+
+    # "<2, 3>" reshapes <6> to <2, 3>
+    var b<2, 3> = [1, 2.2, 3, 4.4, 5, 6.6];
+
+    var c = mul_transpose(a, b);
+    print(c);
+}
+\end{lstlisting}
+
+\subsubsection*{Процесс компиляции:}
+
+\begin{enumerate}
+	\item Парсинг в AST (Abstract Syntax Tree).
+	\item \label{mlir_toy} Генерация из AST промежуточного представления, которое состоит из операций диалекта высокого уровня, определённого для данного языка при помощи MLIR.
+	\item Вывод типов.
+	\item Оптимизация промежуточного представления из шага \ref{mlir_toy}.
+	\item \label{affine} Частичное понижение (от англ. lowering) промежуточного представления сгенерированного в шаге \ref{mlir_toy} в промежуточное представление более низкого уровня, состоящее из следующих диалектов:
+	      \begin{itemize}
+		      \item arith\footnote{\url{https://mlir.llvm.org/docs/Dialects/ArithOps/} (дата доступа:   \DTMdate{2024-01-04}).};
+		      \item affine\footnote{\url{https://mlir.llvm.org/docs/Dialects/Affine/} (дата доступа:   \DTMdate{2024-01-04}).};
+		      \item func\footnote{\url{https://mlir.llvm.org/docs/Dialects/Func/} (дата доступа:   \DTMdate{2024-01-04}).};
+		      \item memref\footnote{\url{https://mlir.llvm.org/docs/Dialects/MemRef/} (дата доступа:   \DTMdate{2024-01-04}).}.
+	      \end{itemize}
+	\item Оптимизация промежуточного представления из шага \ref{affine}.
+	\item \label{llvm_mlir} Понижение промежуточного представления из шага \ref{affine} в промежуточное представление, основанное на диалекте LLVM\footnote{\url{https://mlir.llvm.org/docs/Dialects/LLVM/} (дата доступа:   \DTMdate{2024-01-04}).}.
+	\item Понижение промежуточного представления из шага \ref{llvm_mlir} в LLVM IR.
+	\item Компиляция LLVM IR при помощи JIT компилятора LLVM.
+\end{enumerate}
+
+\subsubsection{AST}
+
+Корнем AST является модуль --- список функций. Функция представляется как пара: прототип --- имя и аргументы, тело. Тело функции состоит из списка выражений.
+
+\begin{lstlisting}[caption={AST языка.}, language=Caml, frame=single]
+type shape = int array
+type var = string
+
+type expr =
+    | Num of float
+    | Literal of shape * expr list
+    | Var of var
+    | VarDecl of string * shape * expr
+    | Return of expr option
+    | BinOp of [ `Add | `Mul ] * expr * expr
+    | Call of string * expr list
+    | Print of expr
+
+type proto = Prototype of string * var list
+type func = Function of proto * expr list
+type modul = func list
+\end{lstlisting}
+
+\subsubsection{Парсер}
+
+Парсер для мини языка программирования реализован при помощи парсер-комбинаторов. В качестве библиотеки парсер-комбинаторов использовалась библиотека angstrom\footnote{\url{https://github.com/inhabitedtype/angstrom} (дата доступа:   \DTMdate{2024-01-04}).}, т.к она является самой популярной среди таковых и обладает лучшей производительностью и документацией среди аналогов.
+
+\subsubsection{Диалект для мини языка}
+
+\begin{lstlisting}[caption={Определение диалекта.}, frame=single]
+def Toy_Dialect : Dialect {
+    let name = "toy";
+    let cppNamespace = "::mlir::toy";
+}
+\end{lstlisting}
+
+\label{toy_ops} Диалект содержит 10 операций:
+\begin{enumerate}
+	\item toy.constant --- операция, представляющая константу (тензор);
+	\item toy.add --- операция сложения тензоров;
+	\item toy.mul --- операция умножения тензоров;
+	\item toy.cast --- вспомогательная операция для встраивания (inlining) функций;
+	\item \label{func} toy.func --- операция, моделирующая функции;
+	\item toy.return --- операция возврата значения из функции (операции \ref{func});
+	\item toy.generic\_call --- операция, представляющая вызов функции (операции \ref{func});
+	\item toy.print --- операция печати тензора в стандартный вывод;
+	\item toy.reshape --- операция изменения формы тензора;
+	\item toy.transpose --- операция транспонирования тензора.
+\end{enumerate}
+
+\begin{lstlisting}[caption={Определение при помощи TableGen операции toy.constant.}, frame=single]
+def ConstantOp : Toy_Op<"constant", [Pure]> {
+    let summary = "constant";
+    let description = [{
+        Constant operation turns a literal into an SSA value.
+        The data is attached to the operation as an attribute.
+
+        ```mlir
+        %0 = toy.constant dense<[[1.0, 2.0], [3.0, 4.0]]>
+                                           : tensor<2x2xf64>
+        ```
+    }];
+
+    // The constant operation takes an attribute as
+    // the only input.
+    let arguments = (ins F64ElementsAttr);
+
+    // The constant operation returns a single
+    // value of TensorType.
+    let results = (outs F64Tensor);
+    ...
+}
+\end{lstlisting}
+
+\subsubsection{Генерация из AST промежуточного представления высокого уровня}
+
+Для генерации первого промежуточного представления, содержащего операции из вышеупомянутого диалекта, производился обход AST и последовательная генерация операций диалекта из узлов AST. Создание операции происходит при помощи модуля <<OperationState>>, путём определения имени, позиции в файле, операндов, результатов, и именованных атрибутов будущей операции.
+
+\begin{lstlisting}[caption={Пример программы на мини языке программирования.}, frame=single, label={toy_ex}]
+def multiply_transpose(a, b) {
+    return transpose(a) * transpose(b);
+}
+
+def main() {
+    var a<2, 3> = [[1, 2, 3], [4, 5, 6]];
+    var b<2, 3> = [1, 2, 3, 4, 5, 6];
+    var c = multiply_transpose(a, b);
+    print(c);
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Сгенерированное промежуточное представление высокого уровня для программы листинга \ref{toy_ex}.}, frame=single, label={toy_ir}]
+module {
+ toy.func @multiply_transpose(%arg0: tensor<*xf64>,
+                            %arg1:tensor<*xf64>) -> tensor<*xf64>
+ {
+    %0 = toy.transpose(%arg0 : tensor<*xf64>) to tensor<*xf64>
+    %1 = toy.transpose(%arg1 : tensor<*xf64>) to tensor<*xf64>
+    %2 = toy.mul %0, %1 : tensor<*xf64>
+    toy.return %2 : tensor<*xf64>
+ }
+
+ toy.func @main() {
+    %0 = toy.constant dense<[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]>
+                                            : tensor<2x3xf64>
+    %1 = toy.reshape(%0 : tensor<2x3xf64>) to tensor<2x3xf64>
+    %2 = toy.constant dense<[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]>
+                                            :tensor<6xf64>
+    %3 = toy.reshape(%2 : tensor<6xf64>) to tensor<2x3xf64>
+    %4 = toy.generic_call @multiply_transpose(%1, %3)
+     : (tensor<2x3xf64>, tensor<2x3xf64>) -> tensor<*xf64>
+    toy.print %4 : tensor<*xf64>
+    toy.return
+ }
+}
+\end{lstlisting}
+
+\subsubsection{Вывод типов (форм тензоров)}
+
+Для дальнейших оптимизаций и генераций более низкоуровневых промежуточных представлений необходимо, чтобы все значения имели тензоры определённой формы (на данный момент это не так. Например, на листинге \ref{toy_ir} переменная \%4 имеет тип \texttt{tensor$<$*xf64$>$} --- безранговый тензор). Поэтому необходимо вывести формы для всех значений из известных форм.
+Алгоритм вывода следующий:
+
+\begin{enumerate}
+	\item встроить (inline) все вызовы функций в main;
+	\item распространить (propagate) формы через все вычисления:
+	      \begin{enumerate}
+		      \item \label{work_list}составить список всех операций которые возвращают безранговый тензор (это и будут те операции, для которых необходимо произвести вывод);
+		      \item \label{loop} найти в списке \ref{work_list} операцию, у которой все операнды имеют тензор с определённой формой (если таковой не нашлось, то закончить вывод);
+		      \item удалить операцию из списка \ref{work_list};
+		      \item вывести форму для возвращаемого значения операции \ref{loop} из формы её операндов (например, если выводим для операции умножения (операция умножения поэлементная!), то форма возвращаемого значения равна форме любого операнда; для транспонирования форма возвращаемого значения равна перевёрнутой (reversed) форме операнда);
+		      \item если список \ref{work_list} пустой, то завершить вывод, иначе перейти к \ref{loop}.
+	      \end{enumerate}
+\end{enumerate}
+
+\subsubsection{Оптимизации для промежуточного представления, основанного на диалекте мини языка}
+
+Хорошим примером иметь такое высокоуровневое промежуточное представление является возможность произвести оптимизацию, которая исключает последовательность двух транспонирований тензоров.
+
+Для реализации этой оптимизаций было декларативно (при помощи TableGen) определено такое же правило перезаписи, как и на листинге \ref{rewrite_pat}.
+
+Кроме того, были добавлены оптимизации для операции изменения формы тензора (<<toy.reshape>>):
+
+\begin{itemize}
+	\item если производилась попытка изменить форму тензора на ту же форму, то операция <<toy.reshape>> удалялась;
+	\item при использовании операнда изменения формы тензора, форма изменялась непосредственно в операции <<toy.constant>>.
+\end{itemize}
+
+\textbf{Замечание}.
+После этих оптимизаций операции <<toy.reshape>> больше нет в промежуточном представлении.
+
+Более того, был добавлен проход (от англ. pass) <<cse>> --- com\-mon subexpression elimination (удаление общих подвыражений), который уже определён в MLIR.
+
+\begin{lstlisting}[caption={Сгенерированное промежуточное представление для программы листинга \ref{toy_ex} после вывода форм и определения вышеупомянутых оптимизаций.}, frame=single]
+module {
+ toy.func @main() {
+    %0 = toy.constant dense<[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]>
+                                            : tensor<2x3xf64>
+    %1 = toy.transpose(%0 : tensor<2x3xf64>) to tensor<3x2xf64>
+    %2 = toy.mul %1, %1 : tensor<3x2xf64>
+    toy.print %2 : tensor<3x2xf64>
+    toy.return
+ }
+}
+\end{lstlisting}
+
+\subsubsection{Понижение промежуточного представления в более низкоуровневое}
+
+Для внедрения новых оптимизаций и дальнейшего понижения до LLVM IR необходимо понизить текущее высокоуровневое промежуточное представление в более низкоуровневое, которое в дальнейшем будем называть аффинным, состоящее из следующих диалектов:
+
+\begin{itemize}
+	\item affine\footnote{\url{https://mlir.llvm.org/docs/Dialects/Affine/} (дата доступа:   \DTMdate{2024-01-04}).} --- предоставляет абстракцию над аффинными преобразованиями. Для наших целей предоставляет операцию <<affine.\-for>>\footnote{\url{https://mlir.llvm.org/docs/Dialects/Affine/\#affinefor-affineaffineforop} (дата доступа:   \DTMdate{2024-01-04}).}, которая моделирует цикл;
+	\item arith\footnote{\url{https://mlir.llvm.org/docs/Dialects/ArithOps/} (дата доступа:   \DTMdate{2024-01-04}).} --- предоставляет операции базовых математических операций;
+	\item func\footnote{\url{https://mlir.llvm.org/docs/Dialects/Func/} (дата доступа:   \DTMdate{2024-01-04}).} диалект содержит операции, моделирующие создание и взаимодействие с функциями;
+	\item memref\footnote{\url{https://mlir.llvm.org/docs/Dialects/MemRef/} (дата доступа:   \DTMdate{2024-01-04}).} --- предоставляет операции для управления памятью, которые используют тип \texttt{memref}\footnote{\url{https://mlir.llvm.org/docs/Dialects/Builtin/\#memreftype} (дата доступа:   \DTMdate{2024-01-04}).}, представляющий многомерный буфер.
+\end{itemize}
+
+Каждая операция из \ref{toy_ops} транслировалась в набор операций из вышеупомянутых диалектов.
+
+\textbf{Замечание}.
+После раннее добавленных проходов в промежуточном представлении больше нет операций <<toy.cast>>, <<toy.generic\_call>> и <<toy.reshape>>.
+
+\begin{itemize}
+	\item Для операции <<toy.constant>> сначала генерировались операции <<arith.\-cons\-tant>>, которые представляют обычные \texttt{float64} константы, затем аллоцировался и инициализировался этими константами буфер <<memref>>, который представлял в памяти тензор.
+	\item Для операций <<toy.add>> и <<toy.mul>> генерировались вложенные циклы <<af\-fine.\-for>>, итерирующиеся по всем элементам буфера, в теле которых происходило поэлементное складывание или умножение элементов буферов при помощи операций <<arith.\-mulf>> и <<arith.\-addf>>.
+	\item Для операции <<toy.transpose>> генерировался дополнительный буфер с перевёрнутой (reversed) формой, и создавался цикл, который заполнял новый буфер в соответствии с семантикой операции транспонирования.
+	\item Операции <<toy.func>> и <<toy.return>> прямолинейно транслировались в операции <<func.func>> и <<func.return>> соответственно.
+	\item Операция <<toy.print>> транслируется в вызов внешней функции <<printMemrefF64>>, которая содержится в библиотеке <<libmlir\_\-run\-ner\_utils>> (эта библиотека содержится в MLIR и представляет из себя небольшую runtime библиотеку для облегчения ввода/вывода). Для этого сначала генерируется forward-declaration функции <<printMemrefF64>>, затем, т. к эта функция принимает безранговый буфер, для операнда операции <<toy.print>> генерируется операция <<memref.cast>>, которая конвертирует буфер с рангом в безранговый, потом генерируется операция <<func.call>> для вызова функции <<printMemrefF64>>.
+\end{itemize}
+
+\subsubsection{Оптимизации аффиного промежуточного представления}
+После понижения в аффинное промежуточное представление были добавлены уже реализованные в MLIR проходы: <<cse>> (удаление общих подвыражений), <<affine-loop-fusion>>\footnote{\url{https://mlir.llvm.org/docs/Passes/\#-affine-loop-fusion} (дата доступа:   \DTMdate{2024-01-04}).} (слияние циклов), <<affine-scalar-replacement>>\footnote{\url{https://mlir.llvm.org/docs/Passes/\#-affine-scalrep} (дата доступа:   \DTMdate{2024-01-04}).} (удаляет избыточные обращения к буферам).
+
+\begin{lstlisting}[caption={Сгенерированное промежуточное представление для программы листинга \ref{toy_ex} после понижения до аффинного промежуточного представления и добавления вышеупомянутых оптимизаций.}, frame=single]
+module {
+  func.func @printMemrefF64(memref<*xf64>)
+  func.func @main() {
+   %cst = arith.constant 1.000000e+00 : f64
+   %cst_0 = arith.constant 2.000000e+00 : f64
+   %cst_1 = arith.constant 3.000000e+00 : f64
+   %cst_2 = arith.constant 4.000000e+00 : f64
+   %cst_3 = arith.constant 5.000000e+00 : f64
+   %cst_4 = arith.constant 6.000000e+00 : f64
+   %alloc = memref.alloc() : memref<3x2xf64>
+   %alloc_5 = memref.alloc() : memref<2x3xf64>
+   affine.store %cst_4, %alloc_5[1, 2] : memref<2x3xf64>
+   affine.store %cst_3, %alloc_5[1, 1] : memref<2x3xf64>
+   affine.store %cst_2, %alloc_5[1, 0] : memref<2x3xf64>
+   affine.store %cst_1, %alloc_5[0, 2] : memref<2x3xf64>
+   affine.store %cst_0, %alloc_5[0, 1] : memref<2x3xf64>
+   affine.store %cst, %alloc_5[0, 0] : memref<2x3xf64>
+   affine.for %arg0 = 0 to 3 {
+     affine.for %arg1 = 0 to 2 {
+       %0 = affine.load %alloc_5[%arg1, %arg0] : memref<2x3xf64>
+       %1 = arith.mulf %0, %0 : f64
+       affine.store %1, %alloc[%arg0, %arg1] : memref<3x2xf64>
+     }
+   }
+   %cast = memref.cast %alloc : memref<3x2xf64> to memref<*xf64>
+   call @printMemrefF64(%cast) : (memref<*xf64>) -> ()
+   memref.dealloc %alloc_5 : memref<2x3xf64>
+   memref.dealloc %alloc : memref<3x2xf64>
+   return
+  }
+}
+\end{lstlisting}
+
+\subsubsection{Понижение промежуточного представления в диалект LLVM}
+
+Диалект LLVM\footnote{\url{https://mlir.llvm.org/docs/Dialects/LLVM/} (дата доступа:   \DTMdate{2024-01-04}).} полностью соответствует LLVM IR. Для большинства диалектов, которые находятся в репозитории MLIR, понижение в диалект LLVM уже определено. Поэтому понизить аффинное промежуточное представление не представляло труда.
+
+\subsubsection{Понижение в LLVM IR и компиляция при помощи JIT}
+
+После всех проделанных манипуляций оставалось лишь передать MLIR-модуль JIT-компилятору, который неявно понизит LLVM диалект в LLVM IR и скомпилирует программу, а также не забыть слинковать библиотеку <<libmlir\_\-run\-ner\_utils>>, которая используется для печати тензоров.
+
+\begin{lstlisting}[caption={Вывод для программы листинга \ref{toy_ex}.}, frame=single]
+[[1,   16],
+ [4,   25],
+ [9,   36]]
+\end{lstlisting}
