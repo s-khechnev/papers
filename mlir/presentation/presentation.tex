@@ -1,0 +1,264 @@
+\documentclass{beamer}
+%Для защит онлайн лучше использовать разрешение 16x9
+%\documentclass[aspectratio=169]{beamer}
+
+\input{preamble.tex}
+
+% То, что в квадратных скобках, отображается внизу по центру каждого слайда.
+\title[MLIR OCaml]{Реализация привязок к MLIR для OCaml}
+
+% То, что в квадратных скобках, отображается в левом нижнем углу.
+\institute[СПбГУ]{}
+
+% То, что в квадратных скобках, отображается в левом нижнем углу.
+\author[Хечнев Семен]{Семен Евгеньевич Хечнев, группа 21.Б07-мм}
+
+\begin{document}
+{
+\setbeamertemplate{footline}{}
+% Лого университета или организации, отображается в шапке титульного листа
+\begin{frame}
+	\includegraphics[width=1.4cm]{pictures/SPbGU_Logo.png}
+	\vspace{-35pt}
+	\hspace{-10pt}
+	\begin{center}
+		\begin{tabular}{c}
+			\scriptsize{Санкт-Петербургский государственный университет} \\
+			\scriptsize{Кафедра системного программирования}
+		\end{tabular}
+		\titlepage
+	\end{center}
+
+	\btVFill
+
+	{\scriptsize
+		\textbf{Научный руководитель:} Д.С. Косарев, ассистент кафедры системного программирования \\
+	}
+	\begin{center}
+		\vspace{5pt}
+		\scriptsize{Санкт-Петербург\\
+			2023}
+	\end{center}
+
+\end{frame}
+}
+
+\begin{frame}[fragile]
+	\frametitle{Введение}
+	\begin{itemize}
+		\item Существует множество инструментов, реализованных на разных языках
+		\item Чтобы использовать решения, написанные на других языках программирования, реализуют привязки (от англ. bindings)
+	\end{itemize}
+
+	\begin{itemize}
+		\item LLVM\footnote{\url{https://llvm.org/} (дата доступа:   \DTMdate{2024-01-04}).} --- инфраструктура для разработки компиляторов
+		\item MLIR\footnote{\url{https://mlir.llvm.org/} (дата доступа:   \DTMdate{2024-01-04}).} (Multi-Level Intermediate Representation) --- подпроект LLVM, инфраструктура для определения и внедрения промежуточных представлений
+		\item MLIR реализован на C++, хочется использовать в OCaml
+	\end{itemize}
+\end{frame}
+
+\begin{frame}
+	\frametitle{Обзор --- MLIR (1)}
+	\textbf{MLIR} предоставляет:
+	\begin{itemize}
+		\item Гибкое базовое промежуточное представление в SSA (Static Single Assignment) форме
+		      \begin{itemize}
+			      \item SSA $\Leftrightarrow$ каждой переменной значение присваивается ровно один раз
+		      \end{itemize}
+		\item Инструменты для расширения и анализа IR (Intermediate Representation)
+		\item Готовые проходы (passes)
+		\item Инструменты для тестирования и отладки
+	\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]
+	\frametitle{Обзор --- MLIR (2)}
+	Базовые \textbf{объекты} в MLIR:
+
+	\begin{itemize}
+		\item Основная сущность --- операция
+		\item Атрибуты --- compile-time константы, прикреплённые к операциям
+		\item Типы
+		\item Блоки --- список операций, заканчивающийся терминатором
+		\item Регионы --- список блоков
+	\end{itemize}
+
+	\begin{lstlisting}[caption = {Пример операции}, frame=single]
+^bb1:
+   %res:2 = "mydialect.op"(%arg1) { attr = 3 }
+      : (i32) -> (f32, i8) loc("mysrc.ml":10:8)
+   ...
+\end{lstlisting}
+
+\end{frame}
+
+\begin{frame}[fragile]
+	\frametitle{Обзор --- MLIR (3)}
+	\begin{itemize}
+		\item Для поддержки расширяемости IR MLIR использует диалекты
+		\item Диалект --- пространство имён для операций, типов и атрибутов
+		\item Базовое промежуточное представление --- диалект <<builtin>>\footnote{\url{https://mlir.llvm.org/docs/Dialects/Builtin/} (дата доступа:   \DTMdate{2024-01-04}).}
+	\end{itemize}
+\end{frame}
+
+% \begin{frame}[fragile]
+% 	\frametitle{Обзор --- MLIR TableGen}
+% 	\begin{itemize}
+% 		\item 	Для определения новых диалектов, операций, правил переписывания IR MLIR предоставляет декларативный DSL --- TableGen
+% 	\end{itemize}
+% 	\begin{lstlisting}[caption={Определение диалекта <<MyDialect>> при помощи TableGen}, frame=single]
+% def MyDialect : Dialect {
+%     let name = "myDialect";
+
+%     let summary = "My dialect.";
+%     let description = [{ My cool dialect. }];
+
+%     let cppNamespace = "myDialect";
+% }
+% \end{lstlisting}
+
+% \end{frame}
+
+\begin{frame}
+	\frametitle{Постановка задачи}
+	\textbf{Целью} работы является реализация привязок к MLIR для OCaml %озвученной выше
+
+	\textbf{Задачи}:
+	\begin{itemize}
+		\item Реализовать привязки к MLIR
+		\item Разработать компилятор для мини языка программирования с использованием разработанных привязок
+		\item Реализовать тесты
+	\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]
+	\frametitle{Обзор --- ctypes}
+
+	\begin{itemize}
+		\item Ctypes\footnote{\url{https://github.com/yallop/ocaml-ctypes} (дата доступа:   \DTMdate{2024-01-04}).} --- это OCaml библиотека для создания привязок к \textsc{С}
+		      \begin{itemize}
+			      \item Для создания привязки необходимо определить имя и сигнатуру связываемой функции
+		      \end{itemize}
+	\end{itemize}
+
+	\begin{lstlisting}[caption={Пример привязки <<print\_int>> для функции С, которая принимает \texttt{int} и возвращает \texttt{void}},language=Caml, frame=single]
+let print_int = foreign "print_int"
+                           (int @-> returning void)
+\end{lstlisting}
+
+\end{frame}
+
+\begin{frame}[fragile]
+	\frametitle{Обзор --- существующие решения}
+	\begin{itemize}
+		\item За основу взяты существующие привязки\footnote{\url{https://github.com/tachukao/ocaml-mlir} (дата доступа:   \DTMdate{2024-01-04}).} к MLIR
+		\item Особенности:
+		      \begin{itemize}
+			      \item Реализованы к форку MLIR 11 версии
+			      \item Не примитивного примера использования нет
+			      \item Больше не поддерживаются
+		      \end{itemize}
+	\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]
+	\frametitle{Реализация --- привязки}
+	\textbf{Что было сделано}:
+	\begin{itemize}
+		\item Выбрана целевая версия MLIR --- 16.0.6
+		\item Обновлены зависимости и удалён устаревший код
+		\item Добавлена возможность собирать привязки, используя dev пакеты\footnote{\url{https://apt.llvm.org/} (дата доступа:   \DTMdate{2024-01-04}).} MLIR и LLVM
+		\item Реализовано большинство недостающих привязок
+	\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]
+	\frametitle{Реализация --- мини язык программирования (1)}
+
+	\begin{itemize}
+		\item Тип данных --- тензоры (ранга 0--2) с элементами типа \texttt{float64}
+		\item Операции:
+		      \begin{itemize}
+			      \item печать
+			      \item поэлементное сложение и умножение
+			      \item транспонирование
+			      \item изменение формы тензора
+		      \end{itemize}
+		\item Можно определять функции
+		\item Переменные неизменяемы, статическая типизация, вывод типов
+	\end{itemize}
+
+	\begin{lstlisting}[caption={Пример программы на мини языке программирования}, frame=single]
+def main() {
+    var a = [[1, 2, 3], [4, 5, 6]];
+    var b<3, 2> = [1, 2, 3, 4, 5, 6];
+    print(a * transpose(b));
+}
+\end{lstlisting}
+
+	\blfootnote{\url{https://mlir.llvm.org/docs/Tutorials/Toy/}}
+
+\end{frame}
+
+\begin{frame}[fragile]
+	\frametitle{Реализация --- мини язык программирования (2)}
+	\begin{itemize}
+		\item Процесс компиляции:
+		      \begin{itemize}
+			      \item Парсинг в AST
+			      \item Генерация из AST IR высокого уровня
+			      \item Вывод типов
+			      \item Оптимизация IR
+			      \item Понижение (lowering) IR высокого уровня в более низкоуровневое
+			      \item Оптимизация IR
+			      \item Понижение в диалект LLVM
+			      \item Понижение в LLVM IR
+			      \item Компиляция LLVM IR при помощи JIT
+		      \end{itemize}
+	\end{itemize}
+\end{frame}
+
+\begin{frame}
+	\frametitle{Тестирование}
+	\begin{itemize}
+		\item Для привязок уже были реализованы тесты, оставалось внести небольшие правки, чтобы они работали для версии 16.0.6
+		\item Для каждого этапа компиляции мини языка программирования были реализованы тесты
+		\item CI
+		      \begin{itemize}
+			      \item Сборка
+			      \item Запуск тестов
+			      \item Обновление отчёта о покрытии
+		      \end{itemize}
+
+		\item Тестовое покрытие
+		      \begin{itemize}
+			      \item Покрытие всего проекта --- 55\%
+			            \begin{itemize}
+				            \item Привязок --- 46\%
+				            \item Компилятора мини языка --- 96\%
+			            \end{itemize}
+		      \end{itemize}
+	\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+	\frametitle{Заключение}
+	\textbf{Результаты}:
+	\begin{itemize}
+		\item Реализованы привязки к MLIR
+		\item Разработан компиляторо для мини языка программирования с использованием реализованных привязок
+		\item Реализованы тесты
+	\end{itemize}
+
+	\textbf{Планы на будущее}:
+	\begin{itemize}
+		\item Реализовать компилятор для подмножества некоторого ML языка с использованием MLIR
+	\end{itemize}
+
+	\blfootnote{Код проекта: \url{https://github.com/s-khechnev/ocaml-mlir}}
+	\blfootnote{Имя аккаунта: s-khechnev}
+
+\end{frame}
+
+\end{document}
