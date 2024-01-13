@@ -7,7 +7,6 @@
 *.pag
 *.toc
 *.xdv
-*.pdf
 *.dvi
 *.fls
 /.aspell*
